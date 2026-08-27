@@ -94,7 +94,10 @@ git -C sglang checkout 73a255206f916366c8d26d4022f82ddfb0ab558d
 ./flash-next-w4-ple/scripts/apply_patches.sh ./sglang
 ```
 
-`apply_patches.sh` refuses any unexpected source hash. It applies, in order:
+`apply_patches.sh` refuses any unexpected source or release-input hash. It
+builds and compiles all three final files in temporary staging before changing
+the checkout, then installs them with verified rollback on any handled failure.
+The staged changes are, in order:
 
 1. signed-W4/group-16 PLE storage and Triton UVA gather;
 2. strict persistent-sidecar loading and source binding;
@@ -228,16 +231,23 @@ python3 -m py_compile \
   flash-next-w4-ple/tests/*.py
 
 docker run --rm --entrypoint python3 \
-  -e PYTHONPATH=/release/src:/release/scripts \
   -v "$PWD/flash-next-w4-ple:/release:ro" \
   lmsysorg/sglang@sha256:59f06adce6f91401adf443bd168d45fdb2044d77671fd591c7c57a29d851cbae \
   /release/tests/test_ple_w4_sidecar.py
+
+python3 flash-next-w4-ple/tests/test_apply_patches_transaction.py \
+  --sglang-repo /path/to/pristine/sglang
 ```
 
-That last command must print `PLE_W4_SIDECAR_TESTS_OK`. The CUDA probes
-`probe_cpu_cuda_parity.py`, `probe_model_class_parity.py`, and `test_overlay.py`
-must be run one at a time on an isolated SM120 GPU in the exact image, with the
-pristine model mounted at `/models/flash-next`, the release mounted at
+The CPU sidecar command must print `PLE_W4_SIDECAR_TESTS_OK`; the installer
+test must print `PATCH_TRANSACTION_TESTS_OK`. The latter creates and removes a
+temporary linked worktree at the pinned SGLang commit, checks a fresh
+`core.autocrlf=true` clone, rejects a tampered release input, injects failures
+after every install stage, and verifies an exact successful install. The CUDA
+probes `probe_cpu_cuda_parity.py`, `probe_model_class_parity.py`, and
+`test_overlay.py` must be run one at a time on an isolated SM120 GPU in the
+exact image, with the pristine model mounted at `/models/flash-next`, the
+release mounted at
 `/release`, `PYTHONPATH=/release/src:/release/scripts`, and the patched SGLang
 files mounted at the same container paths used by `serve.example.sh`. Their
 success markers are respectively `PLE_W4_CPU_CUDA_PARITY_OK`,
