@@ -1,14 +1,30 @@
-# Qwen3.8-27B NVFP4 + DSpark on RTX PRO 6000
+# Qwen3.8 on a single RTX PRO 6000
 
-Independent deployment and benchmark report for the official SGLang
-Qwen3.8-27B NVFP4 + DSpark serving recipe on a single NVIDIA RTX PRO 6000
-Blackwell Workstation Edition.
+Independent deployment reports, reproducibility artifacts, and benchmark
+receipts for running large Qwen3.8 models on one NVIDIA RTX PRO 6000 Blackwell
+Workstation Edition.
 
-## Read the report
+## Reports
 
-[Open the full eight-page PDF](Qwen3.8-27B-NVFP4-DSpark-RTX-PRO-6000-Full-Report.pdf)
+| Deployment | Result | Report and artifacts |
+| --- | --- | --- |
+| Qwen3.8-Flash-Next NVFP4 with a signed-W4 host PLE sidecar | 125B main model plus a 51.2 GB PLE table reduced to 28.8 GB; qualified at 131K context | [Implementation, source, receipts, and PDF](flash-next-w4-ple/) |
+| Qwen3.8-27B NVFP4 with DSpark | 119.19 output tok/s over the validated 8x workload | [Eight-page PDF](Qwen3.8-27B-NVFP4-DSpark-RTX-PRO-6000-Full-Report.pdf) |
 
-## Validated result
+The Flash-Next package is the current, more demanding deployment. It includes
+the exact downstream SGLang patches, sidecar builder and loader, safe serving
+example, validation evidence, scoped licenses, and the long-form PDF. Its
+28.8 GB binary companion is published at
+[`Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE`](https://huggingface.co/Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE),
+with the complete verified artifact and final attribution card at Hub revision
+`06460849ae986134d843937b828d1c11ad1941da`.
+
+## Qwen3.8-27B NVFP4 + DSpark report
+
+This earlier report covers the official SGLang Qwen3.8-27B NVFP4 + DSpark
+serving recipe on the same GPU class.
+
+### Validated result
 
 The clean benchmark used SGLang's OpenAI-compatible serving benchmark with a
 random dataset, 8,192 input tokens, 1,024 output tokens, eight requests,
@@ -29,7 +45,7 @@ Single-request server decode windows exceeded 206 tok/s and reached 265.67
 tok/s when DSpark acceptance was higher. Those windows are not equivalent to
 the full random-workload average.
 
-## Configuration highlights
+### Configuration highlights
 
 - ModelOpt NVFP4 target with FP8 E4M3 KV cache
 - DSpark gamma 7 and verification width 8
@@ -46,7 +62,7 @@ workload-sized memory ratio does not establish that the full native window is
 available under this serving profile; recalculate and revalidate before making
 that claim or increasing concurrency.
 
-## Reproducibility pins
+### Reproducibility pins
 
 - Target: `RadixArk/Qwen3.8-27B-NVFP4`
   - revision `554ebba9b5f1b79dc11246341960360e6ef05ef4`
@@ -57,15 +73,17 @@ that claim or increasing concurrency.
 - FlashInfer Python source commit:
   `906181e3f4cf4bcc81835fb480db4011bbd80b62`
 
-## References
+### References
 
 - [SGLang Qwen3.8-27B cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)
 - [SGLang Qwen3.8 configuration source](https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/qwen3.8-27b.jsx)
 - [Community Qwen3.8 MTP project](https://github.com/sudoingX/qwen38-mtp)
 
-## Integrity
+## Integrity and independence
 
-The PDF's SHA-256 digest is recorded in [`CHECKSUMS.txt`](CHECKSUMS.txt).
+Published PDF SHA-256 digests are recorded in
+[`CHECKSUMS.txt`](CHECKSUMS.txt). The Flash-Next subtree has its own complete
+[`SHA256SUMS`](flash-next-w4-ple/SHA256SUMS) receipt.
 
 This is an independent technical report and is not an official publication of
 Alibaba Qwen, SGLang, NVIDIA, RadixArk, or FlashInfer.

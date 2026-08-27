@@ -1,0 +1,39 @@
+[
+  {
+    "case": "alpha",
+    "http": 200,
+    "expected": "ALPHA_OK",
+    "got": "ALPHA_OK",
+    "ok": true,
+    "seconds": 0.259,
+    "finish_reason": "stop"
+  },
+  {
+    "case": "beta",
+    "http": 200,
+    "expected": "BETA_OK",
+    "got": "BETA_OK",
+    "ok": true,
+    "seconds": 0.26,
+    "finish_reason": "stop"
+  },
+  {
+    "case": "math",
+    "http": 200,
+    "expected": "219",
+    "got": "219",
+    "ok": true,
+    "seconds": 0.259,
+    "finish_reason": "stop"
+  },
+  {
+    "case": "omega",
+    "http": 200,
+    "expected": "OMEGA_OK",
+    "got": "OMEGA_OK",
+    "ok": true,
+    "seconds": 0.258,
+    "finish_reason": "stop"
+  }
+]
+

@@ -1,0 +1,344 @@
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -1,6 +1,7 @@
+ """Inference-only Qwen4-Exp (text + VL) on the Qwen3.5 backbone."""
+ 
+ import math
++import os
+ from contextlib import nullcontext
+ from typing import Any, Iterable, Optional, Set, Tuple
+ 
+@@ -747,6 +748,51 @@
+     )
+ 
+ 
++@triton.jit
++def _gather_ple_embedding_from_pinned_w4_kernel(
++    weight_ptr,
++    scale_ptr,
++    ids_ptr,
++    output_ptr,
++    embedding_dim,
++    groups_per_row,
++    tp_vocab_start,
++    tp_vocab_end,
++    BLOCK_D: tl.constexpr,
++):
++    row_id = tl.program_id(0)
++    global_idx = tl.load(ids_ptr + row_id)
++    in_range = (global_idx >= tp_vocab_start) & (global_idx < tp_vocab_end)
++    local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0)
++    offsets = tl.arange(0, BLOCK_D)
++    mask = offsets < embedding_dim
++
++    weight_ptr = weight_ptr.to(tl.int64).to(tl.pointer_type(tl.uint8))
++    scale_ptr = scale_ptr.to(tl.int64).to(tl.pointer_type(tl.float8e4nv))
++    packed = tl.load(
++        weight_ptr + local_idx * (embedding_dim // 2) + offsets // 2,
++        mask=mask,
++        other=0,
++    )
++    nibble = tl.where(
++        (offsets & 1) == 0,
++        packed & 0xF,
++        (packed >> 4) & 0xF,
++    ).to(tl.int32)
++    signed = tl.where(nibble >= 8, nibble - 16, nibble).to(tl.float32)
++    scale = tl.load(
++        scale_ptr + local_idx * groups_per_row + offsets // 16,
++        mask=mask,
++        other=0.0,
++    ).to(tl.float32)
++    values = signed * scale
++    tl.store(
++        output_ptr + row_id * embedding_dim + offsets,
++        tl.where(in_range, values, 0.0).to(tl.bfloat16),
++        mask=mask,
++    )
++
++
+ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
+     """PLE table read directly from pinned host memory.
+ 
+@@ -869,6 +915,173 @@
+         return self.reduce(self.gather(input_ids))
+ 
+ 
++class Qwen4ExpPackedPinnedHostEmbedding(VocabParallelEmbedding):
++    """Block-16 signed INT4 PLE table read directly from pinned host memory."""
++
++    _COPIED_ATTRIBUTES = Qwen4ExpPinnedHostEmbedding._COPIED_ATTRIBUTES
++    _GROUP_SIZE = 16
++
++    def __init__(self, embedding: VocabParallelEmbedding) -> None:
++        nn.Module.__init__(self)
++        if not isinstance(embedding.quant_method, UnquantizedEmbeddingMethod):
++            raise NotImplementedError(
++                "packed PLE offload requires an unquantized source embedding"
++            )
++        if embedding.weight.dtype != torch.float8_e4m3fn:
++            raise TypeError(
++                "packed PLE offload requires fp8 source weights, got "
++                f"{embedding.weight.dtype}"
++            )
++        if embedding.num_added_embeddings:
++            raise NotImplementedError(
++                "packed PLE offload does not support added vocabulary rows"
++            )
++        if embedding.embedding_dim % self._GROUP_SIZE or embedding.embedding_dim % 2:
++            raise ValueError(
++                "packed PLE offload requires embedding_dim divisible by 16"
++            )
++        for name in self._COPIED_ATTRIBUTES:
++            setattr(self, name, getattr(embedding, name))
++        self.quant_method = None
++        self.groups_per_row = self.embedding_dim // self._GROUP_SIZE
++        self.packed_dim = self.embedding_dim // 2
++        source_weight = embedding.weight
++        rows = source_weight.shape[0]
++
++        packed_weight = nn.Parameter(
++            torch.empty(
++                (rows, self.packed_dim),
++                dtype=torch.uint8,
++                device="cpu",
++                pin_memory=True,
++            ),
++            requires_grad=False,
++        )
++        packed_weight.weight_loader = self.weight_loader
++        self.register_parameter("weight", packed_weight)
++        self.register_buffer(
++            "block_scales",
++            torch.empty(
++                (rows, self.groups_per_row),
++                dtype=torch.float8_e4m3fn,
++                device="cpu",
++                pin_memory=True,
++            ),
++            persistent=False,
++        )
++        self.register_buffer(
++            "weight_scale", embedding.weight_scale, persistent=True
++        )
++        del embedding.weight
++        del source_weight
++        torch.cuda.empty_cache()
++        self._block_d = triton.next_power_of_2(self.embedding_dim)
++        self._chunk_rows = max(
++            1, int(os.environ.get("SGLANG_QWEN4_PLE_W4_CHUNK_ROWS", "262144"))
++        )
++        logger.info(
++            "Allocated packed PLE host table: rows=%d dim=%d packed=%.3f GiB "
++            "scales=%.3f GiB chunk_rows=%d",
++            rows,
++            self.embedding_dim,
++            self.weight.numel() / (1024**3),
++            self.block_scales.numel() / (1024**3),
++            self._chunk_rows,
++        )
++
++    @torch.no_grad()
++    def load_fp8_rows(self, source: torch.Tensor, dst_start: int) -> None:
++        if source.dtype != torch.float8_e4m3fn:
++            raise TypeError(
++                f"packed PLE source shard must be fp8 e4m3, got {source.dtype}"
++            )
++        if source.ndim != 2 or source.shape[1] != self.embedding_dim:
++            raise ValueError(
++                "packed PLE source shape mismatch: "
++                f"{tuple(source.shape)} vs (*, {self.embedding_dim})"
++            )
++        total = source.shape[0]
++        if dst_start < 0 or dst_start + total > self.weight.shape[0]:
++            raise ValueError(
++                f"packed PLE destination out of range: {dst_start}+{total}"
++            )
++        device = torch.device("cuda", torch.cuda.current_device())
++        for offset in range(0, total, self._chunk_rows):
++            count = min(self._chunk_rows, total - offset)
++            x = source[offset : offset + count].to(
++                device=device, dtype=torch.float32, non_blocking=False
++            )
++            blocks = x.reshape(count, self.groups_per_row, self._GROUP_SIZE)
++            max_positive = blocks.clamp_min(0).amax(dim=-1) / 7.0
++            max_negative = (-blocks.clamp_max(0)).amax(dim=-1) / 8.0
++            scale = torch.maximum(max_positive, max_negative).clamp_min(2**-9)
++            scale_fp8 = scale.to(torch.float8_e4m3fn)
++            q = torch.round(blocks / scale_fp8.float().unsqueeze(-1))
++            q = q.clamp(-8, 7).to(torch.int16).reshape(count, self.embedding_dim)
++            lo = q[:, 0::2] & 0xF
++            hi = (q[:, 1::2] & 0xF) << 4
++            packed = (lo | hi).to(torch.uint8)
++            dst = slice(dst_start + offset, dst_start + offset + count)
++            self.weight.data[dst].copy_(packed, non_blocking=False)
++            self.block_scales[dst].copy_(scale_fp8, non_blocking=False)
++            del x, blocks, max_positive, max_negative, scale, scale_fp8, q, packed
++        torch.cuda.empty_cache()
++
++    def allocate_output(
++        self, shape: Tuple[int, ...], device: torch.device
++    ) -> torch.Tensor:
++        allocation_context = nullcontext()
++        if self.tp_size > 1:
++            allocation_context = use_symmetric_memory(
++                get_tp_group(), disabled=not is_allocation_symmetric()
++            )
++        with allocation_context, torch.inference_mode(False):
++            return torch.empty(shape, dtype=torch.bfloat16, device=device)
++
++    def gather(
++        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None
++    ) -> torch.Tensor:
++        expected_shape = (*input_ids.shape, self.embedding_dim)
++        if out is None:
++            output = self.allocate_output(expected_shape, input_ids.device)
++        else:
++            if tuple(out.shape) != expected_shape:
++                raise ValueError(
++                    f"invalid packed PLE output shape: {tuple(out.shape)} != "
++                    f"{expected_shape}"
++                )
++            if out.dtype != torch.bfloat16 or out.device != input_ids.device:
++                raise ValueError(
++                    "packed PLE output must be bfloat16 on the id device"
++                )
++            output = out
++
++        flat_ids = input_ids.reshape(-1).long()
++        if flat_ids.numel():
++            _gather_ple_embedding_from_pinned_w4_kernel[(flat_ids.numel(),)](
++                self.weight.data_ptr(),
++                self.block_scales.data_ptr(),
++                flat_ids,
++                output,
++                embedding_dim=self.embedding_dim,
++                groups_per_row=self.groups_per_row,
++                tp_vocab_start=self.shard_indices.org_vocab_start_index,
++                tp_vocab_end=self.shard_indices.org_vocab_end_index,
++                BLOCK_D=self._block_d,
++            )
++        return output
++
++    def reduce(self, output: torch.Tensor) -> torch.Tensor:
++        if self.tp_size > 1 and not get_attn_tp_context().input_scattered:
++            if self.use_attn_tp_group:
++                return attn_tp_all_reduce(output)
++            return tensor_model_parallel_all_reduce(output)
++        return output
++
++    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
++        return self.reduce(self.gather(input_ids))
++
++
+ class Qwen4ExpPLELayer(nn.Module):
+     def __init__(
+         self,
+@@ -892,9 +1105,19 @@
+             quant_config=quant_config,
+         )
+         if config.ple_offload_embedding:
+-            self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
+-                self.ple_embedding.ngram_embedding
+-            )
++            if os.environ.get("SGLANG_QWEN4_PLE_W4", "0") == "1":
++                logger.warning(
++                    "Using experimental block-16 signed INT4 pinned PLE offload"
++                )
++                self.ple_embedding.ngram_embedding = (
++                    Qwen4ExpPackedPinnedHostEmbedding(
++                        self.ple_embedding.ngram_embedding
++                    )
++                )
++            else:
++                self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
++                    self.ple_embedding.ngram_embedding
++                )
+         self.short_conv_dilation = self.ple_embedding.ngram_size
+         self.short_conv_state_len = (
+             self.conv_kernel_size - 1
+@@ -1854,11 +2077,15 @@
+                 local_start = ov_start - tp_start
+                 src_start = ov_start - row_start
+                 n_rows = ov_end - ov_start
+-                emb.weight.data[local_start : local_start + n_rows].copy_(
+-                    loaded_weight[src_start : src_start + n_rows].to(
+-                        device=emb.weight.device, dtype=emb.weight.dtype
++                source_rows = loaded_weight[src_start : src_start + n_rows]
++                if isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding):
++                    emb.load_fp8_rows(source_rows, local_start)
++                else:
++                    emb.weight.data[local_start : local_start + n_rows].copy_(
++                        source_rows.to(
++                            device=emb.weight.device, dtype=emb.weight.dtype
++                        )
+                     )
+-                )
+ 
+         def load_qwen4_exp_ple_shard(name: str, loaded_weight: torch.Tensor) -> bool:
+             if ".ngram_embedding.shard_" not in name:
+@@ -1875,7 +2102,8 @@
+                 return False
+             emb = ple_mod.ngram_embedding
+             if (
+-                loaded_weight.dtype == torch.float8_e4m3fn
++                not isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding)
++                and loaded_weight.dtype == torch.float8_e4m3fn
+                 and emb.weight.dtype != torch.float8_e4m3fn
+             ):
+                 if isinstance(emb, Qwen4ExpPinnedHostEmbedding):
+@@ -1904,7 +2132,8 @@
+                 params_dict.pop(f"{mod_prefix}.ngram_embedding.weight", None)
+                 torch.cuda.empty_cache()
+             if (
+-                emb.weight.dtype == torch.float8_e4m3fn
++                not isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding)
++                and emb.weight.dtype == torch.float8_e4m3fn
+                 and loaded_weight.dtype != torch.float8_e4m3fn
+             ):
+                 if not getattr(load_qwen4_exp_ple_shard, "_warned_downcast", False):
+@@ -1922,6 +2151,8 @@
+             actual_rows = loaded_weight.shape[0]
+             shard_end = shard_start + actual_rows
+             copy_ple_rows_to_tp_embedding(emb, loaded_weight, shard_start, shard_end)
++            if isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding):
++                packed_loaded_shards.setdefault(mod_prefix, set()).add(shard_idx)
+             loaded_shard_params.add(f"{mod_prefix}.ngram_embedding.weight")
+             return True
+ 
+@@ -1944,6 +2175,7 @@
+         loaded_params: Set[str] = set()
+         loaded_buffers: Set[str] = set()
+         loaded_shard_params: Set[str] = set()
++        packed_loaded_shards = {}
+         skipped_visual_count = 0
+ 
+         for name, loaded_weight in weights:
+@@ -2105,6 +2337,27 @@
+         loaded_params.update(loaded_buffers)
+         loaded_params.update(loaded_shard_params)
+ 
++        expected_ple_shards = set(range(ple_num_sync_shards))
++        for mod_prefix, ple_mod in ple_modules.items():
++            emb = ple_mod.ngram_embedding
++            if isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding):
++                seen = packed_loaded_shards.get(mod_prefix, set())
++                if seen != expected_ple_shards:
++                    missing = sorted(expected_ple_shards - seen)
++                    extra = sorted(seen - expected_ple_shards)
++                    raise ValueError(
++                        f"packed PLE shard verification failed for {mod_prefix}: "
++                        f"missing={missing} extra={extra}"
++                    )
++                loaded_params.add(
++                    f"{mod_prefix}.ngram_embedding.block_scales"
++                )
++                logger.info(
++                    "Verified and packed all %d PLE source shards for %s",
++                    len(seen),
++                    mod_prefix,
++                )
++
+         if skipped_visual_count > 0:
+             logger.info(
+                 f"[language_model_only] Qwen4 load_weights: skipped "

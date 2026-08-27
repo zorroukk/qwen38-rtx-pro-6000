@@ -1,0 +1,9 @@
+{
+  "tokenized_prompt_tokens": 131094,
+  "context_length": 131072,
+  "http": 400,
+  "elapsed_s": 0.489,
+  "response": "{\"object\":\"error\",\"message\":\"The input (131094 tokens) is longer than the model's context length (131072 tokens).\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}",
+  "ok": true
+}
+

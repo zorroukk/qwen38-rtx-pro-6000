@@ -1,0 +1,37 @@
+{
+  "created_utc": "2026-08-26T17:11:30Z",
+  "source_receipt_sha256": "800597879c35f59b20f0986d3dd8329ca44405f499f9129aa07ebd6ec83a7346",
+  "source_receipt_note": "Sanitized summary of the sealed 8K-profile W4 qualification receipt; local paths, container ID, and retired-service state omitted.",
+  "runtime": {
+    "image_digest": "sha256:59f06adce6f91401adf443bd168d45fdb2044d77671fd591c7c57a29d851cbae",
+    "sglang_commit": "d91c3682b0b429e4c70df63cd57f819588ce29b0",
+    "ple": "signed_int4_group16_fp8_e4m3_block_scale",
+    "ple_packed_bytes": 28800138240,
+    "qsa_decode": "flashinfer_xqa_sm120",
+    "gdn_prefill": "flashinfer",
+    "gdn_decode": "triton",
+    "kv_cache_dtype": "bfloat16",
+    "mamba_ssm_dtype": "float32"
+  },
+  "serving_arm": {
+    "context_length": 8192,
+    "max_total_tokens": 8192,
+    "max_running_requests": 4,
+    "cuda_decode_graph_batches": [1, 2, 4],
+    "prefill_graph": "disabled",
+    "radix_cache": "disabled"
+  },
+  "validation": {
+    "concurrent_exact": "4/4",
+    "quality_hard_gate": "13/13",
+    "sustained_requests": "36/36",
+    "instruct_c4_median_aggregate_tok_s": 319.825,
+    "thinking_c4_median_aggregate_tok_s": 264.889,
+    "instruct_c4_median_ttft_s": 0.160731,
+    "thinking_c4_median_ttft_s": 0.168531,
+    "peak_power_w": 408.07,
+    "peak_temp_c": 66,
+    "log_error_count": 0
+  }
+}
+

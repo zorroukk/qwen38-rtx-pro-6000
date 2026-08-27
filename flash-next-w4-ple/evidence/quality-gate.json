@@ -1,0 +1,100 @@
+{
+  "passed": 11,
+  "total": 11,
+  "rows": [
+    {
+      "case": "c4_exact_0",
+      "passed": true,
+      "expected": "SIDECAR_C4_00_OK",
+      "answer": "SIDECAR_C4_00_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.3409
+    },
+    {
+      "case": "c4_exact_1",
+      "passed": true,
+      "expected": "SIDECAR_C4_01_OK",
+      "answer": "SIDECAR_C4_01_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.3422
+    },
+    {
+      "case": "c4_exact_2",
+      "passed": true,
+      "expected": "SIDECAR_C4_02_OK",
+      "answer": "SIDECAR_C4_02_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.3411
+    },
+    {
+      "case": "c4_exact_3",
+      "passed": true,
+      "expected": "SIDECAR_C4_03_OK",
+      "answer": "SIDECAR_C4_03_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.3395
+    },
+    {
+      "case": "c4_exact_4",
+      "passed": true,
+      "expected": "SIDECAR_C4_04_OK",
+      "answer": "SIDECAR_C4_04_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.1971
+    },
+    {
+      "case": "c4_exact_5",
+      "passed": true,
+      "expected": "SIDECAR_C4_05_OK",
+      "answer": "SIDECAR_C4_05_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.1964
+    },
+    {
+      "case": "c4_exact_6",
+      "passed": true,
+      "expected": "SIDECAR_C4_06_OK",
+      "answer": "SIDECAR_C4_06_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.195
+    },
+    {
+      "case": "c4_exact_7",
+      "passed": true,
+      "expected": "SIDECAR_C4_07_OK",
+      "answer": "SIDECAR_C4_07_OK",
+      "reasoning_content": null,
+      "elapsed_s": 0.1949
+    },
+    {
+      "case": "math_exact",
+      "passed": true,
+      "answer": "703",
+      "reasoning_content": null,
+      "elapsed_s": 0.1311
+    },
+    {
+      "case": "tool_exact",
+      "passed": true,
+      "finish_reason": "tool_calls",
+      "tool_calls": [
+        {
+          "id": "call_cbf0628b39b3467bbd3e793f",
+          "index": 0,
+          "type": "function",
+          "function": {
+            "name": "multiply",
+            "arguments": "{\"a\": 37, \"b\": 19}"
+          }
+        }
+      ],
+      "elapsed_s": 1.0034
+    },
+    {
+      "case": "strict_json",
+      "passed": true,
+      "answer": "{\"status\": \"ok\", \"value\": 73}",
+      "elapsed_s": 0.2503
+    }
+  ]
+}

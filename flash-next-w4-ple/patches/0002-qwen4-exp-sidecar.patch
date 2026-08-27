@@ -1,0 +1,233 @@
+--- qwen4_exp.w4-base.py
++++ qwen4_exp.sidecar.py
+@@ -979,18 +979,97 @@
+         self._chunk_rows = max(
+             1, int(os.environ.get("SGLANG_QWEN4_PLE_W4_CHUNK_ROWS", "262144"))
+         )
++        self._sidecar_loaded = False
++        self._sidecar_receipt = None
++        sidecar_dir = os.environ.get("SGLANG_QWEN4_PLE_W4_SIDECAR")
++        if sidecar_dir:
++            if self.tp_size != 1:
++                raise NotImplementedError(
++                    "packed PLE sidecars currently support tensor parallel size 1 only"
++                )
++            try:
++                from sglang.srt.models.qwen4_ple_w4_sidecar import (
++                    load_sidecar_into_tensors,
++                )
++
++                sidecar_chunk_bytes = max(
++                    4096,
++                    int(
++                        os.environ.get(
++                            "SGLANG_QWEN4_PLE_W4_SIDECAR_CHUNK_BYTES",
++                            str(64 * 1024 * 1024),
++                        )
++                    ),
++                )
++                expected_source_env = {
++                    "model_index_sha256": (
++                        "SGLANG_QWEN4_PLE_W4_SOURCE_INDEX_SHA256"
++                    ),
++                    "config_sha256": "SGLANG_QWEN4_PLE_W4_SOURCE_CONFIG_SHA256",
++                    "hf_tree_receipt_sha256": (
++                        "SGLANG_QWEN4_PLE_W4_SOURCE_TREE_SHA256"
++                    ),
++                    "ple_raw_sha256": "SGLANG_QWEN4_PLE_W4_SOURCE_PLE_SHA256",
++                    "model_revision": "SGLANG_QWEN4_PLE_W4_SOURCE_REVISION",
++                }
++                expected_source = {}
++                for source_key, env_name in expected_source_env.items():
++                    env_value = os.environ.get(env_name)
++                    if not env_value:
++                        raise ValueError(
++                            f"{env_name} is required for strict PLE sidecar binding"
++                        )
++                    expected_source[source_key] = env_value
++                expected_manifest_sha256 = os.environ.get(
++                    "SGLANG_QWEN4_PLE_W4_SIDECAR_MANIFEST_SHA256"
++                )
++                if not expected_manifest_sha256:
++                    raise ValueError(
++                        "SGLANG_QWEN4_PLE_W4_SIDECAR_MANIFEST_SHA256 is "
++                        "required for strict PLE sidecar binding"
++                    )
++                self._sidecar_receipt = load_sidecar_into_tensors(
++                    sidecar_dir,
++                    self.weight.data,
++                    self.block_scales,
++                    group_size=self._GROUP_SIZE,
++                    chunk_bytes=sidecar_chunk_bytes,
++                    progress=logger.info,
++                    expected_source=expected_source,
++                    expected_manifest_sha256=expected_manifest_sha256,
++                )
++                self._sidecar_loaded = True
++                logger.info(
++                    "Loaded verified packed PLE sidecar: manifest=%s elapsed=%.3fs",
++                    self._sidecar_receipt["manifest_sha256"],
++                    self._sidecar_receipt["elapsed_s"],
++                )
++            except Exception:
++                if os.environ.get(
++                    "SGLANG_QWEN4_PLE_W4_SIDECAR_FALLBACK", "0"
++                ) != "1":
++                    raise
++                logger.exception(
++                    "Packed PLE sidecar failed validation; explicit fallback "
++                    "is enabled, so source shards will be packed online"
++                )
+         logger.info(
+             "Allocated packed PLE host table: rows=%d dim=%d packed=%.3f GiB "
+-            "scales=%.3f GiB chunk_rows=%d",
++            "scales=%.3f GiB chunk_rows=%d sidecar=%s",
+             rows,
+             self.embedding_dim,
+             self.weight.numel() / (1024**3),
+             self.block_scales.numel() / (1024**3),
+             self._chunk_rows,
++            self._sidecar_loaded,
+         )
+ 
+     @torch.no_grad()
+     def load_fp8_rows(self, source: torch.Tensor, dst_start: int) -> None:
++        if self._sidecar_loaded:
++            raise RuntimeError(
++                "source PLE rows must not overwrite a verified packed sidecar"
++            )
+         if source.dtype != torch.float8_e4m3fn:
+             raise TypeError(
+                 f"packed PLE source shard must be fp8 e4m3, got {source.dtype}"
+@@ -2101,6 +2180,13 @@
+             if ple_mod is None:
+                 return False
+             emb = ple_mod.ngram_embedding
++            packed_seen = None
++            if isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding):
++                packed_seen = packed_loaded_shards.setdefault(mod_prefix, set())
++                if shard_idx in packed_seen:
++                    raise ValueError(
++                        f"duplicate packed PLE source shard {shard_idx} for {mod_prefix}"
++                    )
+             if (
+                 not isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding)
+                 and loaded_weight.dtype == torch.float8_e4m3fn
+@@ -2150,9 +2236,49 @@
+             shard_start = shard_idx * shard_size
+             actual_rows = loaded_weight.shape[0]
+             shard_end = shard_start + actual_rows
++            if (
++                isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding)
++                and emb._sidecar_loaded
++            ):
++                source_metadata = emb._sidecar_receipt["source"]
++                if mod_prefix != source_metadata["module_prefix"]:
++                    raise ValueError(
++                        "packed PLE sidecar module mismatch: "
++                        f"checkpoint={mod_prefix} "
++                        f"sidecar={source_metadata['module_prefix']}"
++                    )
++                expected_rows = int(source_metadata["rows_per_shard"])
++                if shard_size != expected_rows:
++                    raise ValueError(
++                        "sidecar-backed PLE shard partition mismatch: "
++                        f"runtime={shard_size} sidecar={expected_rows}"
++                    )
++                if actual_rows != expected_rows:
++                    raise ValueError(
++                        "sidecar-backed PLE source shard row mismatch: "
++                        f"expected {expected_rows}, got {actual_rows} for shard {shard_idx}"
++                    )
++                if loaded_weight.dtype != torch.float8_e4m3fn:
++                    raise TypeError(
++                        "sidecar-backed PLE source shard must be fp8 e4m3, got "
++                        f"{loaded_weight.dtype} for shard {shard_idx}"
++                    )
++                if loaded_weight.ndim != 2 or loaded_weight.shape[1] != emb.embedding_dim:
++                    raise ValueError(
++                        "sidecar-backed PLE source shard shape mismatch: "
++                        f"{tuple(loaded_weight.shape)} for shard {shard_idx}"
++                    )
++                if shard_end > emb.weight.shape[0]:
++                    raise ValueError(
++                        "sidecar-backed PLE source shard exceeds packed table: "
++                        f"{shard_end} > {emb.weight.shape[0]}"
++                    )
++                packed_seen.add(shard_idx)
++                loaded_shard_params.add(f"{mod_prefix}.ngram_embedding.weight")
++                return True
+             copy_ple_rows_to_tp_embedding(emb, loaded_weight, shard_start, shard_end)
+             if isinstance(emb, Qwen4ExpPackedPinnedHostEmbedding):
+-                packed_loaded_shards.setdefault(mod_prefix, set()).add(shard_idx)
++                packed_seen.add(shard_idx)
+             loaded_shard_params.add(f"{mod_prefix}.ngram_embedding.weight")
+             return True
+ 
+@@ -2172,6 +2298,24 @@
+                 getattr(self.config, "split_ngram_parts", 512),
+             )
+         )
++        sidecar_modules = [
++            mod_name
++            for mod_name, mod in ple_modules.items()
++            if isinstance(
++                mod.ngram_embedding, Qwen4ExpPackedPinnedHostEmbedding
++            )
++            and mod.ngram_embedding._sidecar_loaded
++        ]
++        if sidecar_modules:
++            if len(sidecar_modules) != 1 or len(ple_modules) != 1:
++                raise NotImplementedError(
++                    "packed PLE sidecars require exactly one PLE embedding module"
++                )
++            if ple_num_sync_shards != 128:
++                raise ValueError(
++                    "packed PLE sidecars require split_ngram_parts=128, got "
++                    f"{ple_num_sync_shards}"
++                )
+         loaded_params: Set[str] = set()
+         loaded_buffers: Set[str] = set()
+         loaded_shard_params: Set[str] = set()
+@@ -2352,11 +2496,36 @@
+                 loaded_params.add(
+                     f"{mod_prefix}.ngram_embedding.block_scales"
+                 )
+-                logger.info(
+-                    "Verified and packed all %d PLE source shards for %s",
+-                    len(seen),
+-                    mod_prefix,
+-                )
++                if emb._sidecar_loaded:
++                    rows_per_shard = int(
++                        emb._sidecar_receipt["source"]["rows_per_shard"]
++                    )
++                    if rows_per_shard * len(seen) != emb.weight.shape[0]:
++                        raise ValueError(
++                            "packed PLE sidecar shard coverage does not match "
++                            f"the table: {rows_per_shard}*{len(seen)} "
++                            f"!= {emb.weight.shape[0]}"
++                        )
++                    expected_scale = emb._sidecar_receipt["outer_weight_scale"]
++                    actual_scale = float(emb.weight_scale.detach().float().cpu().item())
++                    if actual_scale != expected_scale:
++                        raise ValueError(
++                            "packed PLE sidecar outer weight scale mismatch for "
++                            f"{mod_prefix}: checkpoint={actual_scale!r} "
++                            f"sidecar={expected_scale!r}"
++                        )
++                    logger.info(
++                        "Verified all %d source shard descriptors against the "
++                        "packed PLE sidecar for %s",
++                        len(seen),
++                        mod_prefix,
++                    )
++                else:
++                    logger.info(
++                        "Verified and packed all %d PLE source shards for %s",
++                        len(seen),
++                        mod_prefix,
++                    )
+ 
+         if skipped_visual_count > 0:
+             logger.info(
