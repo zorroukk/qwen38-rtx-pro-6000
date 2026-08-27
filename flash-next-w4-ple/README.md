@@ -52,7 +52,7 @@ bytes and dequantized BF16 values for the same W4 representation.
 The 28.8 GB companion table is published at
 [`Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE`](https://huggingface.co/Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE).
 The complete, remotely verified Hub revision with final license attribution is
-[`06460849ae986134d843937b828d1c11ad1941da`](https://huggingface.co/Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE/tree/06460849ae986134d843937b828d1c11ad1941da).
+[`8bf4dd3779b15732b303c0931e64961a332a0c78`](https://huggingface.co/Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE/tree/8bf4dd3779b15732b303c0931e64961a332a0c78).
 The exact artifact contract is:
 
 | File | Bytes | SHA-256 |

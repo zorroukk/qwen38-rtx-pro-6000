@@ -82,7 +82,7 @@ through CUDA UVA, and dequantizes them to BF16 on the GPU.
 Source, patches, tests, sanitized evidence, serving example, and the field
 report are published at:
 
-[`lEWFkRAD/qwen38-pro6000-report/flash-next-w4-ple`](https://github.com/lEWFkRAD/qwen38-pro6000-report/tree/Cloud1/flash-next-w4-ple)
+[`lEWFkRAD/qwen38-rtx-pro-6000/flash-next-w4-ple`](https://github.com/lEWFkRAD/qwen38-rtx-pro-6000/tree/Cloud1/flash-next-w4-ple)
 
 Important pins:
 

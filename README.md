@@ -17,7 +17,7 @@ example, validation evidence, scoped licenses, and the long-form PDF. Its
 28.8 GB binary companion is published at
 [`Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE`](https://huggingface.co/Lewfkrad/Qwen3.8-Flash-Next-NVFP4-W4-PLE),
 with the complete verified artifact and final attribution card at Hub revision
-`06460849ae986134d843937b828d1c11ad1941da`.
+`8bf4dd3779b15732b303c0931e64961a332a0c78`.
 
 ## Qwen3.8-27B NVFP4 + DSpark report
 
