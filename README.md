@@ -19,6 +19,10 @@ example, validation evidence, scoped licenses, and the long-form PDF. Its
 with the complete verified artifact and final attribution card at Hub revision
 `8bf4dd3779b15732b303c0931e64961a332a0c78`.
 
+Independent contributors can use the
+[`portable review handoff`](flash-next-w4-ple/NICHO-HANDOFF.md) to work from
+their own GitHub and Codex accounts without access to the live deployment.
+
 ## Qwen3.8-27B NVFP4 + DSpark report
 
 This earlier report covers the official SGLang Qwen3.8-27B NVFP4 + DSpark
