@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,12 +53,72 @@ def assert_hashes(root: Path, expected: dict[Path, str]) -> None:
 
 def assert_pristine(worktree: Path) -> None:
     status = run(
-        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"],
+        [
+            "git",
+            "-c",
+            "core.longpaths=true",
+            "-C",
+            str(worktree),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
         capture_output=True,
     ).stdout
     require(status == "", f"target is dirty after failed install:\n{status}")
     assert_hashes(worktree, BASE_HASHES)
     require(not (worktree / LOADER_REL).exists(), "sidecar loader remains")
+
+
+def assert_target_state(
+    worktree: Path, expected: dict[Path, str], loader_present: bool
+) -> None:
+    assert_hashes(worktree, expected)
+    loader = worktree / LOADER_REL
+    require(loader.exists() == loader_present, "unexpected loader state")
+    if loader_present:
+        require(
+            sha256_file(loader) == FINAL_HASHES[LOADER_REL],
+            "retained loader hash mismatch",
+        )
+
+
+def recovery_directories(worktree: Path) -> set[Path]:
+    return set(worktree.glob(".qwen4-ple-recovery-*"))
+
+
+def assert_recovery_bundle(recovery: Path, injected_stage: str) -> None:
+    instructions = recovery / "RECOVERY.txt"
+    require(instructions.is_file(), "recovery instructions are missing")
+    text = instructions.read_text(encoding="utf-8")
+    for expected in (
+        "Do not rerun the installer",
+        "Qwen recovery copy:",
+        "QSA recovery copy:",
+        EXPECTED_COMMIT,
+        f"injected rollback failure at {injected_stage}",
+    ):
+        require(expected in text, f"recovery instructions omit {expected!r}")
+    assert_hashes(
+        recovery / "rollback",
+        {
+            Path("qwen4_exp.py"): BASE_HASHES[QWEN_REL],
+            Path("qwen_sparse_attn_backend.py"): BASE_HASHES[QSA_REL],
+        },
+    )
+
+
+def restore_pristine_from_bundle(worktree: Path, recovery: Path) -> None:
+    shutil.copy2(recovery / "rollback/qwen4_exp.py", worktree / QWEN_REL)
+    shutil.copy2(
+        recovery / "rollback/qwen_sparse_attn_backend.py",
+        worktree / QSA_REL,
+    )
+    loader = worktree / LOADER_REL
+    if loader.exists() or loader.is_symlink():
+        loader.unlink()
+    shutil.rmtree(recovery)
+    assert_pristine(worktree)
 
 
 def verify_checksum_manifest(release_dir: Path) -> None:
@@ -84,6 +145,8 @@ def main() -> None:
             [
                 "git",
                 "-c",
+                "core.longpaths=true",
+                "-c",
                 "core.autocrlf=true",
                 "clone",
                 "--quiet",
@@ -98,6 +161,10 @@ def main() -> None:
         run(
             [
                 "git",
+                "-c",
+                "core.longpaths=true",
+                "-c",
+                "core.autocrlf=false",
                 "-C",
                 str(sglang_repo),
                 "worktree",
@@ -109,6 +176,7 @@ def main() -> None:
             ]
         )
         try:
+            assert_pristine(worktree)
             helper = cloned_release / "scripts/apply_patches_transaction.py"
 
             tampered_patch = cloned_release / "patches/0001-qwen4-exp-w4-ple.patch"
@@ -163,6 +231,51 @@ def main() -> None:
                 )
                 assert_pristine(worktree)
 
+            rollback_cases = {
+                "loader_unlink": (BASE_HASHES, True),
+                "qsa_replace": (
+                    {
+                        QWEN_REL: BASE_HASHES[QWEN_REL],
+                        QSA_REL: FINAL_HASHES[QSA_REL],
+                    },
+                    False,
+                ),
+                "qwen_replace": (
+                    {
+                        QWEN_REL: FINAL_HASHES[QWEN_REL],
+                        QSA_REL: BASE_HASHES[QSA_REL],
+                    },
+                    False,
+                ),
+                "qsa_fsync": (BASE_HASHES, False),
+                "qwen_fsync": (BASE_HASHES, False),
+            }
+            for rollback_stage, (expected, loader_present) in rollback_cases.items():
+                before = recovery_directories(worktree)
+                environment = os.environ.copy()
+                environment["SGLANG_QWEN4_PLE_PATCH_TEST_FAIL_AFTER"] = "loader"
+                environment[
+                    "SGLANG_QWEN4_PLE_PATCH_TEST_FAIL_ROLLBACK"
+                ] = rollback_stage
+                failed = subprocess.run(
+                    [sys.executable, str(helper), str(worktree)],
+                    env=environment,
+                    text=True,
+                )
+                require(
+                    failed.returncode != 0,
+                    f"rollback injection {rollback_stage} unexpectedly passed",
+                )
+                created = recovery_directories(worktree) - before
+                require(
+                    len(created) == 1,
+                    f"expected one retained recovery bundle, found {created}",
+                )
+                recovery = created.pop()
+                assert_target_state(worktree, expected, loader_present)
+                assert_recovery_bundle(recovery, rollback_stage)
+                restore_pristine_from_bundle(worktree, recovery)
+
             success = run(
                 [sys.executable, str(helper), str(worktree)], capture_output=True
             )
@@ -176,6 +289,8 @@ def main() -> None:
             run(
                 [
                     "git",
+                    "-c",
+                    "core.longpaths=true",
                     "-C",
                     str(sglang_repo),
                     "worktree",
